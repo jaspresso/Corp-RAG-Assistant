@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Step1: parse PDFs",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "exercises.step1_parser",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/venv/bin/python",
+      "console": "integratedTerminal"
+    }
+  ]
+}

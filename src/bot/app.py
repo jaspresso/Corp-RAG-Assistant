@@ -39,4 +39,27 @@ async def main(message: cl.Message) -> None:
     engine = cl.user_session.get("engine")
     # RAG: 내부적으로 질의 임베딩 → Qdrant 유사 검색 → 컨텍스트 + LLM 생성
     response = engine.query(message.content)
-    await cl.Message(content=str(response)).send()
+
+    # LlamaIndex QueryEngine 응답은 기본적으로 `response`(텍스트)와
+    # `source_nodes`(어떤 문서 청크를 근거로 했는지)를 함께 가진다.
+    text = str(response)
+    try:
+        source_nodes = getattr(response, "source_nodes", None) or []
+    except Exception:
+        source_nodes = []
+
+    # 1) 메인 답변 메시지
+    await cl.Message(content=text).send()
+
+    # 2) 근거 문서 미리보기(있을 때만)
+    if source_nodes:
+        preview_lines = []
+        for i, node in enumerate(source_nodes[:3], start=1):
+            meta = node.node.metadata or {}
+            filename = meta.get("filename") or meta.get("url") or meta.get("source") or "알 수 없는 출처"
+            snippet = (node.node.get_content() or "")[:200].replace("\n", " ")
+            preview_lines.append(f"{i}. [{filename}] {snippet}...")
+
+        await cl.Message(
+            content="다음 근거 문서를 참고해 답변을 생성했습니다:\n\n" + "\n".join(preview_lines)
+        ).send()
