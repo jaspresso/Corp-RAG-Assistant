@@ -12,6 +12,14 @@ Chainlit 기반 사내 RAG 챗봇 UI.
 전제:
     Qdrant·Ollama·사전 적재된 ``corporate_knowledge`` 컬렉션은 ``llm_service`` 와 동일 조건이어야 한다.
 """
+import os
+import sys
+
+# Chainlit 이 app.py 를 단독 모듈로 로드할 때 프로젝트 루트가 sys.path 에 없을 수 있다.
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import chainlit as cl
 
 from src.bot.llm_service import get_chat_engine
