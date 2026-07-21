@@ -47,7 +47,7 @@ def get_chat_engine():
 
     # LLM 설정
     Settings.llm = Ollama(
-        model="llama3",
+        model="llama3.1",
         request_timeout=120.0,
         additional_kwargs={
             "system": "당신은 사내 규정 안내 AI 챗봇입니다. 사례 예시가 아닌 규정 표의 내용에 기반하여 정확하게 한국어로만 답변합니다.",
