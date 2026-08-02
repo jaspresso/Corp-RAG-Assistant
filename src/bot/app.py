@@ -1,39 +1,37 @@
 """
 Chainlit 기반 사내 RAG 챗봇 UI.
-
-실행 예:
-    프로젝트 루트에서 ``chainlit run src/bot/app.py`` (또는 프로젝트에 맞는 엔트리 경로).
-
-동작:
-    - 채팅 세션 시작 시 ``get_chat_engine()`` 으로 LlamaIndex 질의 엔진을 만들고
-      ``cl.user_session`` 에 저장해, 이후 메시지마다 같은 엔진을 재사용한다.
-    - 사용자 메시지마다 ``engine.query()`` 로 RAG 답변을 생성한다.
-
-전제:
-    Qdrant·Ollama·사전 적재된 ``corporate_knowledge`` 컬렉션은 ``llm_service`` 와 동일 조건이어야 한다.
 """
 import os
 import sys
 
-# Chainlit 이 app.py 를 단독 모듈로 로드할 때 프로젝트 루트가 sys.path 에 없을 수 있다.
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import chainlit as cl
-
 from src.bot.llm_service import get_chat_engine
 
-# Chainlit 은 내부적으로 FastAPI 앱을 노출한다. openapi_url 을 끄면
-# Swagger/OpenAPI 문서 경로가 비활성화되어(보안·노출 최소화) 배포 시 흔히 쓰인다.
-cl.server.app.openapi_url = None
+# 💡 [핵심] FastAPI OpenAPI 생성 시 OAuth2 스키마 충돌 오류 방지 가드
+try:
+    from chainlit.server import app as fastapi_app
+    def custom_openapi():
+        if fastapi_app.openapi_schema:
+            return fastapi_app.openapi_schema
+        # 기본 openapi 생성 시 에러가 발생하는 구문을 통과하도록 빈 스키마 반환
+        fastapi_app.openapi_schema = {
+            "openapi": "3.0.2",
+            "info": {"title": "Chainlit API", "version": "1.0.0"},
+            "paths": {},
+        }
+        return fastapi_app.openapi_schema
+    fastapi_app.openapi = custom_openapi
+except Exception:
+    pass
 
 
 @cl.on_chat_start
 async def start() -> None:
     """새 채팅 스레드가 열릴 때 한 번 호출된다."""
-    # 매 세션마다 엔진을 새로 만들면 Qdrant/모델 연결 비용이 들 수 있어,
-    # 세션 단위로 한 번 생성 후 user_session 에 보관한다.
     engine = get_chat_engine()
     cl.user_session.set("engine", engine)
     await cl.Message(
@@ -45,29 +43,46 @@ async def start() -> None:
 async def main(message: cl.Message) -> None:
     """사용자가 메시지를 보낼 때마다 호출된다."""
     engine = cl.user_session.get("engine")
-    # RAG: 내부적으로 질의 임베딩 → Qdrant 유사 검색 → 컨텍스트 + LLM 생성
-    response = engine.query(message.content)
+    
+    msg = cl.Message(content="")
+    await msg.send()
 
-    # LlamaIndex QueryEngine 응답은 기본적으로 `response`(텍스트)와
-    # `source_nodes`(어떤 문서 청크를 근거로 했는지)를 함께 가진다.
+    # 동기 질의(query)를 비동기로 안전하게 실행
+    response = await cl.make_async(engine.query)(message.content)
+
     text = str(response)
     try:
         source_nodes = getattr(response, "source_nodes", None) or []
     except Exception:
         source_nodes = []
 
-    # 1) 메인 답변 메시지
-    await cl.Message(content=text).send()
-
-    # 2) 근거 문서 미리보기(있을 때만)
+    # 근거 문서 미리보기 생성 (중복 제거 및 텍스트 깔끔 정제)
+    sources_text = ""
     if source_nodes:
         preview_lines = []
-        for i, node in enumerate(source_nodes[:3], start=1):
-            meta = node.node.metadata or {}
-            filename = meta.get("filename") or meta.get("url") or meta.get("source") or "알 수 없는 출처"
-            snippet = (node.node.get_content() or "")[:200].replace("\n", " ")
-            preview_lines.append(f"{i}. [{filename}] {snippet}...")
+        seen_pages = set()
+        
+        for node in source_nodes:
+            meta = getattr(node.node, "metadata", {}) or {}
+            filename = meta.get("filename") or "문서"
+            page_label = meta.get("page_label", "?")
+            
+            page_key = f"{filename}_p{page_label}"
+            if page_key in seen_pages:
+                continue
+            seen_pages.add(page_key)
 
-        await cl.Message(
-            content="다음 근거 문서를 참고해 답변을 생성했습니다:\n\n" + "\n".join(preview_lines)
-        ).send()
+            raw_text = node.node.get_content() or ""
+            # 줄바꿈 제거 및 연속 공백 정리
+            clean_snippet = " ".join(raw_text.split())[:100]
+            
+            preview_lines.append(f"- [{filename} (p.{page_label})]: {clean_snippet}...")
+            
+            if len(preview_lines) >= 3:  # 사용자 화면에는 상위 3개 출처만 깔끔히 표시
+                break
+
+        if preview_lines:
+            sources_text = "\n\n**다음 근거 문서를 참고해 답변을 생성했습니다:**\n" + "\n".join(preview_lines)
+
+    msg.content = text + sources_text
+    await msg.update()

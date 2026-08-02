@@ -1,75 +1,96 @@
 """
-PyMuPDF(fitz)와 pytesseract OCR을 결합하여
-스캔 이미지 PDF에서도 한국어 텍스트 및 표 구조를 정밀 추출하여 Document로 변환한다.
+pdfplumber 및 Tesseract OCR 기반 고성능 PDF/표 구조 파서.
 """
-import io
 import os
-import fitz  # PyMuPDF
-from PIL import Image
+import glob
+import pdfplumber
 import pytesseract
+from PIL import Image
 from llama_index.core import Document
 
 
-def parse_pdf_to_documents(pdf_dir: str) -> list[Document]:
-    """
-    ``pdf_dir`` 아래의 PDF를 순회하며, 스캔 이미지 PDF일 경우 OCR 엔진을 작동시켜 
-    페이지별 독립 LlamaIndex Document 리스트로 반환한다.
-    """
-    documents: list[Document] = []
-
-    if not os.path.exists(pdf_dir):
-        print(f"❌ [경고] 지정된 경로가 존재하지 않습니다: {pdf_dir}")
-        return documents
-
-    files = [f for f in os.listdir(pdf_dir) if f.endswith(".pdf")]
-    if not files:
-        print(f"❌ [경고] {pdf_dir} 경로 내에 PDF 파일이 없습니다.")
-        return documents
-
-    for filename in files:
-        file_path = os.path.join(pdf_dir, filename)
-        print(f"📄 PDF 파싱 및 OCR 분석 시작: {filename}")
-
-        try:
-            doc_obj = fitz.open(file_path)
-            page_count = len(doc_obj)
-            file_docs_count = 0
-
-            for page_num in range(page_count):
-                page = doc_obj[page_num]
+def extract_table_markdown(page) -> str:
+    """페이지 내 표(Table)를 마크다운 텍스트 형태(| Col1 | Col2 |)로 정제 추출"""
+    tables = page.extract_tables()
+    table_texts = []
+    
+    for table in tables:
+        if not table:
+            continue
+        md_lines = []
+        for row_idx, row in enumerate(table):
+            # None 또는 줄바꿈 정제
+            clean_row = [str(cell).replace("\n", " ").strip() if cell is not None else "" for cell in row]
+            md_line = "| " + " | ".join(clean_row) + " |"
+            md_lines.append(md_line)
+            
+            # 표 헤더 구분선 추가
+            if row_idx == 0:
+                divider = "| " + " | ".join(["---"] * len(clean_row)) + " |"
+                md_lines.append(divider)
                 
-                # 1. 일반 텍스트 추출 시도
-                extracted_text = page.get_text("text", sort=True).strip()
+        table_texts.append("\n".join(md_lines))
+        
+    return "\n\n".join(table_texts)
 
-                # 2. 텍스트가 없는 스캔 이미지 페이지인 경우 Tesseract OCR 작동
-                if not extracted_text:
-                    # 페이지를 고해상도 이미지(DPI 300)로 렌더링
-                    pix = page.get_pixmap(dpi=300)
-                    img_bytes = pix.tobytes("png")
-                    image = Image.open(io.BytesIO(img_bytes))
 
-                    # 한국어 + 영어 OCR 수행
-                    extracted_text = pytesseract.image_to_string(image, lang="kor+eng").strip()
+def parse_pdf_file(pdf_path: str) -> list[Document]:
+    """단일 PDF 파일 파싱 (텍스트 + pdfplumber 표 + OCR  fallback)"""
+    documents = []
+    filename = os.path.basename(pdf_path)
+    print(f"📄 `{filename}` 표 정밀 파싱 시작...")
 
-                # 유효 텍스트 추출 성공 시 Document 생성
-                if extracted_text:
-                    doc = Document(
-                        text=extracted_text,
-                        metadata={
-                            "filename": filename,
-                            "page_label": str(page_num + 1),
-                            "source": "pdf"
-                        },
-                    )
-                    documents.append(doc)
-                    file_docs_count += 1
-                    if (page_num + 1) % 10 == 0 or page_num + 1 == page_count:
-                        print(f"  └─ 진행 중: {page_num + 1}/{page_count} 페이지 완료...")
+    with pdfplumber.open(pdf_path) as pdf:
+        total_pages = len(pdf.pages)
+        for page_num, page in enumerate(pdf.pages, start=1):
+            page_text = page.extract_text() or ""
+            table_md = extract_table_markdown(page)
 
-            doc_obj.close()
-            print(f"🎉 {filename}: 총 {page_count}페이지 중 {file_docs_count}개 페이지 OCR 파싱 성공!")
+            combined_text = ""
+            if page_text.strip():
+                combined_text += f"[본문 텍스트]\n{page_text.strip()}\n\n"
+            if table_md.strip():
+                combined_text += f"[추출된 표 구조]\n{table_md.strip()}\n\n"
 
-        except Exception as e:
-            print(f"❌ {filename} 파싱 중 오류 발생: {e}")
+            # 텍스트와 표가 모두 없는 스캔 이미지 페이지인 경우 OCR 적용
+            if not combined_text.strip():
+                try:
+                    pil_image = page.to_image(resolution=150).original
+                    ocr_text = pytesseract.image_to_string(pil_image, lang="kor+eng")
+                    combined_text = f"[OCR 스캔 텍스트]\n{ocr_text.strip()}"
+                except Exception as e:
+                    print(f"⚠️ {page_num}페이지 OCR 추출 중 경고: {e}")
+
+            if combined_text.strip():
+                doc = Document(
+                    text=combined_text.strip(),
+                    metadata={
+                        "filename": filename,
+                        "page_label": str(page_num),
+                        "total_pages": total_pages,
+                        "source": pdf_path,
+                    },
+                )
+                documents.append(doc)
+
+            if page_num % 50 == 0 or page_num == total_pages:
+                print(f"  └─ 진행 중: {page_num}/{total_pages} 페이지 파싱 완료...")
 
     return documents
+
+
+def parse_pdf_to_documents(pdf_dir: str) -> list[Document]:
+    """지정된 디렉터리의 모든 PDF 파싱"""
+    all_documents = []
+    pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
+
+    if not pdf_files:
+        print(f"⚠️ `{pdf_dir}` 경로에 PDF 파일이 없습니다.")
+        return all_documents
+
+    for pdf_path in pdf_files:
+        docs = parse_pdf_file(pdf_path)
+        all_documents.extend(docs)
+        print(f"🎉 `{os.path.basename(pdf_path)}`: 총 {len(docs)}개 페이지 추출 완료!")
+
+    return all_documents

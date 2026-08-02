@@ -46,8 +46,8 @@ echo "📥 PDF OCR 수집 및 Qdrant (v11) 데이터 적재 파이프라인 실�
 echo "=================================================="
 $VENV_PYTHON -m src.ingestion.pipeline
 
-# 5. Chainlit 챗봇 서버 기동
+# 5. Chainlit 챗봇 서버 기동 (-h 옵션으로 xdg-open 브라우저 자동 오픈 에러 방지)
 echo "=================================================="
 echo "🤖 Chainlit RAG 챗봇 웹 서버를 시작합니다..."
 echo "=================================================="
-$VENV_CHAINLIT run src/bot/app.py
+$VENV_CHAINLIT run src/bot/app.py -h

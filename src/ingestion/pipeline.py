@@ -1,5 +1,5 @@
 """
-RAG 인덱싱(적재) 파이프라인.
+RAG 인덱싱(적재) 파이프라인. (pdfplumber 표 정밀 추출 적용)
 """
 import os
 import sys
@@ -15,13 +15,14 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 
 from src.ingestion.pdf_parser import parse_pdf_to_documents
 
-COLLECTION_NAME = "corporate_knowledge_v11"
+# 💡 표 정밀 파싱 적용 버전 컬렉션 명칭
+COLLECTION_NAME = "corporate_knowledge_v12"
 
 
 def get_ingestion_pipeline() -> IngestionPipeline:
     client = qdrant_client.QdrantClient(url="http://localhost:6333")
 
-    # Qdrant 컬렉션이 없으면 bge-m3(1024차원) 구조로 직접 강제 생성
+    # Qdrant 컬렉션이 없으면 bge-m3(1024차원) 구조로 생성
     if not client.collection_exists(collection_name=COLLECTION_NAME):
         print(f"⚙️ Qdrant 컬렉션 `{COLLECTION_NAME}` 이 존재하지 않아 새롭게 생성합니다...")
         client.create_collection(
@@ -43,6 +44,7 @@ def get_ingestion_pipeline() -> IngestionPipeline:
 
     pipeline = IngestionPipeline(
         transformations=[
+            # 표 마크다운 구조 유지를 위해 청크 크기를 2048로 충분히 유지
             SentenceSplitter(chunk_size=2048, chunk_overlap=100),
             embed_model,
         ],
@@ -53,7 +55,7 @@ def get_ingestion_pipeline() -> IngestionPipeline:
 
 def main() -> None:
     PDF_DIR = "./data/pdfs"
-    print("📥 PDF 수집 시작...")
+    print("📥 PDF 수집 및 pdfplumber 표 추출 시작...")
     
     all_docs = parse_pdf_to_documents(PDF_DIR)
 
@@ -61,7 +63,7 @@ def main() -> None:
         print("❌ 파싱된 Document가 없습니다. 적재를 중단합니다.")
         return
 
-    print(f"🚀 총 {len(all_docs)}개의 페이지 문서를 Qdrant 파이프라인에 적재합니다...")
+    print(f"🚀 총 {len(all_docs)}개의 정밀 파싱 페이지 문서를 Qdrant 파이프라인에 적재합니다...")
     pipeline = get_ingestion_pipeline()
     nodes = pipeline.run(documents=all_docs)
     print(f"🎉 성공! 총 {len(nodes)}개의 노드가 `{COLLECTION_NAME}` 컬렉션에 정밀 저장되었습니다.")
